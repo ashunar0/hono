@@ -50,6 +50,12 @@ type ResponseValidation<In, Out> =
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   | ((value: In, c: Context<any, any, any>) => Out | Promise<Out>)
 
+/**
+ * A Response that `handle` can return. A JSON Response by `c.json()` is not accepted,
+ * because it bypasses the response validation. Return the value instead.
+ */
+type NonJSONResponse = Response & { readonly _format?: 'text' | 'redirect' | 'body' }
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type InputOf<T> = T extends StandardSchema<infer I, any> ? I : Exclude<T, AnyResponse>
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -110,7 +116,6 @@ type RequestOptions<Param, Query, Header, Cookie, Form, Json> = {
 }
 
 interface ValidatedHandler<E extends Env, P extends string> {
-  // Without `response`
   <
     Param = never,
     Query = never,
@@ -118,6 +123,9 @@ interface ValidatedHandler<E extends Env, P extends string> {
     Cookie = never,
     Form = never,
     Json = never,
+    // Not inferred without `response`, so `handle` can return anything
+    ResponseIn = unknown,
+    ResponseOut = never,
     T extends Targets = {
       param: Param
       query: Query
@@ -128,43 +136,23 @@ interface ValidatedHandler<E extends Env, P extends string> {
     },
   >(
     options: RequestOptions<Param, Query, Header, Cookie, Form, Json> & {
-      response?: undefined
-      handle: (c: Context<E, P, ValidatedInput<T>>) => unknown
-    }
-  ): Handler<E, P, ValidatedInput<T>, Promise<Response | RequestFailureResponse<T>>>
-  // With `response`
-  <
-    ResponseIn,
-    ResponseOut,
-    Param = never,
-    Query = never,
-    Header = never,
-    Cookie = never,
-    Form = never,
-    Json = never,
-    T extends Targets = {
-      param: Param
-      query: Query
-      header: Header
-      cookie: Cookie
-      form: Form
-      json: Json
-    },
-  >(
-    options: RequestOptions<Param, Query, Header, Cookie, Form, Json> & {
-      response: ResponseValidation<ResponseIn, ResponseOut>
+      response?: ResponseValidation<ResponseIn, ResponseOut>
       handle: (
         c: Context<E, P, ValidatedInput<T>>
-      ) => NoInfer<ResponseIn | Response | Promise<ResponseIn | Response>>
+      ) => NoInfer<ResponseIn | NonJSONResponse | Promise<ResponseIn | NonJSONResponse>>
     }
   ): Handler<
     E,
     P,
     ValidatedInput<T>,
+    // NoInfer: `ResponseOut` must not be inferred from the contextual type, e.g. `app.get()`
     Promise<
-      | JSONResponseOf<OutputOf<ResponseOut>>
-      | FailureResponseOf<ResponseOut, 'response', 500>
-      | RequestFailureResponse<T>
+      [NoInfer<ResponseOut>] extends [never]
+        ? Response | RequestFailureResponse<T>
+        :
+            | JSONResponseOf<OutputOf<NoInfer<ResponseOut>>>
+            | FailureResponseOf<NoInfer<ResponseOut>, 'response', 500>
+            | RequestFailureResponse<T>
     >
   >
 }

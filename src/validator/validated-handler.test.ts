@@ -415,10 +415,22 @@ describe('validatedHandler', () => {
         response: z.object({ id: z.string() }),
         handle: (c) => (Math.random() > 0.5 ? c.redirect('/') : { id: '1' }),
       })
-      // @ts-expect-error `id` must be a string
       validatedHandler({
         response: z.object({ id: z.string() }),
+        // @ts-expect-error `id` must be a string
         handle: () => ({ id: 1 }),
+      })
+    })
+
+    it('Should not accept a JSON Response from handle when response is given', () => {
+      validatedHandler({
+        response: z.object({ id: z.string() }),
+        // @ts-expect-error `c.json()` would bypass the response validation
+        handle: (c) => c.json({ id: 1 }),
+      })
+      // Without `response`, `c.json()` is accepted as before
+      validatedHandler({
+        handle: (c) => c.json({ id: 1 }),
       })
     })
   })
