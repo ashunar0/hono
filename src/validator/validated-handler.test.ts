@@ -3,6 +3,7 @@ import * as z from 'zod/v4'
 import { hc } from '../client'
 import type { InferResponseType } from '../client'
 import type { Context } from '../context'
+import { createMiddleware } from '../helper/factory'
 import { Hono } from '../hono'
 import type { HTTPException } from '../http-exception'
 import { validatedHandler } from './validated-handler'
@@ -359,6 +360,112 @@ describe('validatedHandler', () => {
       )
       const res = await app.request('/me/42?q=x')
       expect(await res.json()).toEqual({ name: 'yusuke', id: '42' })
+    })
+  })
+
+  describe('middleware', () => {
+    type AuthEnv = { Variables: { userId: string } }
+    const requireAuth = createMiddleware<AuthEnv>(async (c, next) => {
+      c.set('userId', 'u1')
+      await next()
+    })
+
+    it('Should type c.get() with the Env of the middleware without validatedHandler<Env>()', async () => {
+      const app = new Hono().get(
+        '/me',
+        validatedHandler({
+          middleware: [requireAuth],
+          response: z.object({ id: z.string() }),
+          handle: (c) => {
+            expectTypeOf(c.get('userId')).toEqualTypeOf<string>()
+            // @ts-expect-error not in the Env
+            c.get('foo')
+            return { id: c.get('userId') }
+          },
+        })
+      )
+      const res = await app.request('/me')
+      expect(await res.json()).toEqual({ id: 'u1' })
+    })
+
+    it('Should intersect the Envs of multiple middleware', () => {
+      const withRole = createMiddleware<{ Variables: { role: 'admin' | 'member' } }>(
+        async (c, next) => {
+          c.set('role', 'admin')
+          await next()
+        }
+      )
+      validatedHandler({
+        middleware: [requireAuth, withRole],
+        handle: (c) => {
+          expectTypeOf(c.get('userId')).toEqualTypeOf<string>()
+          expectTypeOf(c.get('role')).toEqualTypeOf<'admin' | 'member'>()
+          return {}
+        },
+      })
+    })
+
+    it('Should not validate the request when the middleware returns a response', async () => {
+      const order: string[] = []
+      const deny = createMiddleware(async (c) => {
+        order.push('deny')
+        return c.json({ message: 'Unauthorized' }, 401)
+      })
+      const app = new Hono().post(
+        '/',
+        validatedHandler({
+          middleware: [deny],
+          json: (v) => {
+            order.push('validate')
+            return v
+          },
+          handle: () => {
+            order.push('handle')
+            return {}
+          },
+        })
+      )
+      const res = await app.request('/', { method: 'POST' })
+      expect(res.status).toBe(401)
+      expect(order).toEqual(['deny'])
+    })
+
+    it('Should run middleware, request validation, handle, and response validation in order', async () => {
+      const order: string[] = []
+      const log = createMiddleware(async (c, next) => {
+        order.push('middleware:before')
+        await next()
+        order.push('middleware:after')
+        c.header('X-After', 'yes')
+      })
+      const app = new Hono().post(
+        '/',
+        validatedHandler({
+          middleware: [log],
+          query: (v) => {
+            order.push('query')
+            return v
+          },
+          response: (v: { ok: boolean }) => {
+            order.push('response')
+            return v
+          },
+          handle: () => {
+            order.push('handle')
+            return { ok: true }
+          },
+        })
+      )
+      const res = await app.request('/', { method: 'POST' })
+      expect(order).toEqual([
+        'middleware:before',
+        'query',
+        'handle',
+        'response',
+        'middleware:after',
+      ])
+      expect(res.headers.get('X-After')).toBe('yes')
+      expect(await res.json()).toEqual({ ok: true })
     })
   })
 

@@ -1,6 +1,14 @@
 import type { Context } from '../context'
 import { HTTPException } from '../http-exception'
-import type { Env, FormValue, Handler, TypedResponse, ValidationTargets } from '../types'
+import type {
+  Env,
+  FormValue,
+  Handler,
+  IntersectNonAnyTypes,
+  MiddlewareHandler,
+  TypedResponse,
+  ValidationTargets,
+} from '../types'
 import type { ContentfulStatusCode } from '../utils/http-status'
 import type { JSONParsed } from '../utils/types'
 import type { InferInput } from './utils'
@@ -60,6 +68,15 @@ type NonJSONResponse = Response & { readonly _format?: 'text' | 'redirect' | 'bo
 type InputOf<T> = T extends StandardSchema<infer I, any> ? I : Exclude<T, AnyResponse>
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type OutputOf<T> = T extends StandardSchema<any, infer O> ? O : Exclude<T, AnyResponse>
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyMiddleware = MiddlewareHandler<any, any, any>
+
+// The Env of each middleware, e.g. `Variables` set by `c.set()`
+type MiddlewareEnvs<M extends AnyMiddleware[]> = {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  [K in keyof M]: M[K] extends MiddlewareHandler<infer ME, any, any> ? ME : never
+}
 
 type RequestTarget = keyof ValidationTargets
 
@@ -126,6 +143,7 @@ interface ValidatedHandler<E extends Env, P extends string> {
     // Not inferred without `response`, so `handle` can return anything
     ResponseIn = unknown,
     ResponseOut = never,
+    const M extends AnyMiddleware[] = [],
     T extends Targets = {
       param: Param
       query: Query
@@ -136,9 +154,14 @@ interface ValidatedHandler<E extends Env, P extends string> {
     },
   >(
     options: RequestOptions<Param, Query, Header, Cookie, Form, Json> & {
+      middleware?: [...M]
       response?: ResponseValidation<ResponseIn, ResponseOut>
       handle: (
-        c: Context<E, P, ValidatedInput<T>>
+        c: Context<
+          M extends [] ? E : IntersectNonAnyTypes<[E, ...MiddlewareEnvs<M>]>,
+          P,
+          ValidatedInput<T>
+        >
       ) => NoInfer<ResponseIn | NonJSONResponse | Promise<ResponseIn | NonJSONResponse>>
     }
   ): Handler<
@@ -242,6 +265,7 @@ export const validatedHandler: ValidatedHandlerFactory = ((
   options?: {
     [K in RequestTarget]?: Validation<unknown, unknown>
   } & {
+    middleware?: MiddlewareHandler[]
     response?: Validation<unknown, unknown>
     handle: (c: Context) => unknown
   }
@@ -254,7 +278,7 @@ export const validatedHandler: ValidatedHandlerFactory = ((
     .map((target) => [target, toValidationFunction(options[target]!, target)] as const)
   const validateResponse = options.response && toValidationFunction(options.response, 'response')
 
-  const handler = async (c: Context) => {
+  const run = async (c: Context): Promise<Response> => {
     for (const [target, validate] of validators) {
       let value = getValidationTarget(c, target)
       if (value instanceof Promise) {
@@ -289,7 +313,26 @@ export const validatedHandler: ValidatedHandlerFactory = ((
     return c.json(result as never)
   }
 
+  // Middleware wraps validation and `handle`, so code after `await next()` runs afterwards
+  const middleware = options.middleware ?? []
+  const handler = middleware.length
+    ? async (c: Context) => {
+        const dispatch = async (i: number): Promise<void> => {
+          if (i === middleware.length) {
+            c.res = await run(c)
+            return
+          }
+          const res = await middleware[i](c, () => dispatch(i + 1))
+          if (res) {
+            c.res = res
+          }
+        }
+        await dispatch(0)
+        return c.res
+      }
+    : run
+
   // Readable from `app.routes`, e.g. by an OpenAPI generator
-  const { handle: _, ...validations } = options
+  const { handle: _, middleware: __, ...validations } = options
   return Object.assign(handler, { validations })
 }) as ValidatedHandlerFactory
