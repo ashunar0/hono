@@ -1,7 +1,7 @@
 import type { Child, FC, PropsWithChildren } from '../'
 import type { ErrorHandler, FallbackRender } from '../components'
 import { DOM_ERROR_HANDLER } from '../constants'
-import { Fragment } from './jsx-runtime'
+import { Fragment, jsx } from './jsx-runtime'
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 export const ErrorBoundary: FC<
@@ -32,7 +32,10 @@ export const Suspense: FC<PropsWithChildren<{ fallback: any }>> = (({
       throw err
     }
     err.finally(retry)
-    return fallback
+    // The renderer treats a falsy return as "not handled", so wrap a falsy fallback
+    // (`null`, `false`, `0`, ...) to keep it, as in React. Wrap it as `<>{fallback}</>`:
+    // a bare `Fragment()` node would be diffed against the suspended children and replace them.
+    return fallback || jsx(Fragment, { children: fallback })
   }
   return res
 }) as any
