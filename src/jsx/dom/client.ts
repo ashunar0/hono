@@ -14,15 +14,10 @@ export interface Root {
 }
 export type RootOptions = Record<string, unknown>
 
-/**
- * Create a root object for rendering
- * @param element Render target
- * @param options Options for createRoot (not supported yet)
- * @returns Root object has `render` and `unmount` methods
- */
-export const createRoot = (
+const createRootObject = (
   element: HTMLElement | DocumentFragment,
-  options: RootOptions = {}
+  options: RootOptions,
+  hydrate: boolean
 ): Root => {
   let setJsxNode:
     | undefined // initial state
@@ -54,7 +49,8 @@ export const createRoot = (
             props: {},
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
           } as any) as NodeObject,
-          element
+          element,
+          hydrate
         )
       }
     },
@@ -66,8 +62,20 @@ export const createRoot = (
 }
 
 /**
+ * Create a root object for rendering
+ * @param element Render target
+ * @param options Options for createRoot (not supported yet)
+ * @returns Root object has `render` and `unmount` methods
+ */
+export const createRoot = (
+  element: HTMLElement | DocumentFragment,
+  options: RootOptions = {}
+): Root => createRootObject(element, options, false)
+
+/**
  * Create a root object and hydrate app to the target element.
- * In hono/jsx/dom, hydrate is equivalent to render.
+ * The existing DOM is reused. What differs from `reactNode` is created or removed,
+ * but the attributes of a reused element are left as they are.
  * @param element Render target
  * @param reactNode A JSXNode to render
  * @param options Options for createRoot (not supported yet)
@@ -78,7 +86,7 @@ export const hydrateRoot = (
   reactNode: Child,
   options: RootOptions = {}
 ): Root => {
-  const root = createRoot(element, options)
+  const root = createRootObject(element, options, true)
   root.render(reactNode)
   return root
 }
