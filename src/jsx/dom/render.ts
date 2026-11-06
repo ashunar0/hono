@@ -385,8 +385,9 @@ const findChildNodeIndex = (
   return
 }
 
+let isHydrating = false
 const cancelBuild: symbol = Symbol()
-const applyNodeObject = (node: NodeObject, container: Container, isNew: boolean): void => {
+const applyNodeObject =(node: NodeObject, container: Container, isNew: boolean): void => {
   const next: Node[] = []
   const remove: Node[] = []
   const callbacks: EffectData[] = []
@@ -436,9 +437,11 @@ const applyNodeObject = (node: NodeObject, container: Container, isNew: boolean)
           ? (document.createElementNS(child.n, child.tag as string) as SVGElement | MathMLElement)
           : document.createElement(child.tag as string)
 
+        // A reused <select> keeps what the user selected before hydration
+        const isReused = isHydrating && child.pP === child.props
         applyProps(el as HTMLElement, child.props, child.pP)
         applyNodeObject(child, el as HTMLElement, isNewLocal)
-        if (child.tag === 'select') {
+        if (child.tag === 'select' && !isReused) {
           applySelectValue(el as HTMLSelectElement, child.props)
         }
       }
@@ -834,12 +837,74 @@ export const update = async (
   return promise
 }
 
-export const renderNode = (node: NodeObject, container: Container): void => {
+// Only event handlers and refs are applied to a reused element. Its other attributes
+// come from the server, and setting them again would overwrite what the user typed.
+const hydrateProps = (element: SupportedElement, props: Props): void => {
+  const handlers: Props = {}
+  for (const key in props) {
+    if (key === 'ref' || getEventSpec(normalizeIntrinsicElementKey(key))) {
+      handlers[key] = props[key]
+    }
+  }
+  applyProps(element, handlers)
+}
+
+const isSameDomNode = (dom: ChildNode, child: Node): boolean =>
+  isNodeString(child)
+    ? dom.nodeType === 3
+    : dom.nodeType === 1 &&
+      (dom as Element).localName.toLowerCase() === (child.tag as string).toLowerCase()
+
+// Assign the existing DOM to the built nodes, so that apply() reuses it instead of creating it.
+const hydrateChildren = (node: NodeObject, container: Container): void => {
+  const next: Node[] = []
+  getNextChildren(node, container, next, [], [])
+  const existing: (ChildNode | undefined)[] = Array.from(container.childNodes)
+  for (const child of next) {
+    if (child.tag === HONO_PORTAL_ELEMENT || (isNodeString(child) && !child.t)) {
+      continue
+    }
+    const index = existing.findIndex((dom) => dom && isSameDomNode(dom, child))
+    if (index === -1) {
+      continue // not on the server: apply() creates it
+    }
+    const dom = existing[index] as SupportedElement | Text
+    existing[index] = undefined
+    child.e = dom
+    if (isNodeString(child)) {
+      // The server merges adjacent text into a single text node
+      const data = (dom as Text).data
+      if (data.length > child.t.length && data.startsWith(child.t)) {
+        existing[index] = (dom as Text).splitText(child.t.length)
+      }
+    } else {
+      hydrateProps(dom as SupportedElement, child.props)
+      child.pP = child.props // nothing has changed for apply()
+      if (!child.props.dangerouslySetInnerHTML && child.tag !== 'textarea') {
+        hydrateChildren(child, dom as HTMLElement)
+      }
+    }
+  }
+  existing.forEach((dom) => dom?.remove())
+}
+
+export const renderNode = (node: NodeObject, container: Container, hydrate?: boolean): void => {
   const context: Context = []
   ;(context as Context)[5] = [] // error handler stack
   ;(context as Context)[4] = true // start top level render
   build(context, node, undefined)
   ;(context as Context)[4] = false // finish top level render
+
+  if (hydrate) {
+    hydrateChildren(node, container)
+    isHydrating = true
+    try {
+      apply(node, container, false)
+    } finally {
+      isHydrating = false
+    }
+    return
+  }
 
   const fragment = document.createDocumentFragment()
   apply(node, fragment, true)
