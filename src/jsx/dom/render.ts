@@ -390,6 +390,13 @@ const findChildNodeIndex = (
 }
 
 let isHydrating = false
+export const getIsHydrating = (): boolean => isHydrating
+
+// Put in place of a fallback when children suspend during hydration. It keeps the DOM the server
+// rendered there, and hydration resumes on it when the children are ready, like Preact does.
+const HYDRATE_PLACEHOLDER = '_hh'
+const suspendedHydrations: WeakMap<NodeObject, NodeObject> = new WeakMap()
+const hydratePlaceholders: WeakMap<NodeObject, [NodeObject, Context, Child]> = new WeakMap()
 const cancelBuild: symbol = Symbol()
 const applyNodeObject = (node: NodeObject, container: Container, isNew: boolean): void => {
   const next: Node[] = []
@@ -709,7 +716,15 @@ export const build = (context: Context, node: NodeObject, children?: Child[]): v
           // low priority render
           context[1] = true
         } else {
-          build(context, errorHandlerNode, [fallback])
+          const isSuspendedHydration = isHydrating && e instanceof Promise
+          build(context, errorHandlerNode, [
+            isSuspendedHydration ? ({ tag: HYDRATE_PLACEHOLDER, props: {} } as Child) : fallback,
+          ])
+          if (isSuspendedHydration) {
+            const placeholder = errorHandlerNode.vC[0] as NodeObject
+            suspendedHydrations.set(errorHandlerNode, placeholder)
+            hydratePlaceholders.set(placeholder, [errorHandlerNode, context, fallback])
+          }
           if (
             (errorHandler.length === 1 || context !== errorHandlerContext) &&
             errorHandlerNode.c &&
@@ -795,6 +810,20 @@ const updateSync = (context: Context, node: NodeObject): void => {
     c.values.pop()
   })
   if (context[0] !== 1 || !context[1]) {
+    const placeholder = suspendedHydrations.get(node)
+    if (placeholder) {
+      suspendedHydrations.delete(node)
+      const kept = placeholder.e
+      placeholder.e = undefined // the kept DOM is reused below, so removing the placeholder must not remove it
+      hydrateChildren(node, node.c as Container, kept ? [kept] : [])
+      isHydrating = true
+      try {
+        apply(node, node.c as Container, false)
+      } finally {
+        isHydrating = false
+      }
+      return
+    }
     apply(node, node.c as Container, false)
   }
 }
@@ -867,12 +896,70 @@ const isSameDomNode = (dom: ChildNode, child: Node): boolean =>
       (dom as Element).localName.toLowerCase() === (child.tag as string).toLowerCase()
 
 // Assign the existing DOM to the built nodes, so that apply() reuses it instead of creating it.
-const hydrateChildren = (node: NodeObject, container: Container): void => {
+const hydrateChildren = (
+  node: NodeObject,
+  container: Container,
+  existing: (ChildNode | undefined)[] = Array.from(container.childNodes)
+): void => {
   const next: Node[] = []
   getNextChildren(node, container, next, [], [])
-  const existing: (ChildNode | undefined)[] = Array.from(container.childNodes)
+  let lastIndex = -1
   for (const child of next) {
-    if (child.tag === HONO_PORTAL_ELEMENT || (isNodeString(child) && !child.t)) {
+    if (isNodeString(child) && !child.t) {
+      continue
+    }
+    if (child.tag === HONO_PORTAL_ELEMENT) {
+      // A component such as <title> may have given an element that is already in its container
+      for (const portalChild of child.vC) {
+        if (!isNodeString(portalChild) && portalChild.e?.isConnected) {
+          hydrateChildren(portalChild, portalChild.e as HTMLElement)
+        }
+      }
+      continue
+    }
+    if (child.tag === HYDRATE_PLACEHOLDER) {
+      // Keep the first node after what is already matched. Without markers from the server,
+      // a single node is all that can be told apart.
+      const index = existing.findIndex((dom, i) => i > lastIndex && dom && dom.nodeType !== 8)
+      const dom = existing[index]
+      if (
+        dom?.nodeName === 'TEMPLATE' &&
+        (dom as HTMLTemplateElement).id.startsWith('H:') &&
+        hydratePlaceholders.has(child)
+      ) {
+        // The server has not sent the content yet. Hydrate its fallback and remove the markers,
+        // so that the content from the server is ignored and the client renders its own.
+        const [boundary, context, fallback] = hydratePlaceholders.get(child)!
+        const range: ChildNode[] = []
+        let i = index + 1
+        for (; i < existing.length; i++) {
+          const n = existing[i]
+          if (n?.nodeType === 8 && (n as Comment).data === '/$') {
+            n.remove()
+            existing[i] = undefined
+            break
+          }
+          if (n) {
+            range.push(n)
+            existing[i] = undefined
+          }
+        }
+        dom.remove()
+        existing[index] = undefined
+        lastIndex = i
+        suspendedHydrations.delete(boundary)
+        build(context, boundary, [fallback])
+        hydrateChildren(boundary, container, range)
+        continue
+      }
+      if (index !== -1) {
+        child.e = existing[index] as SupportedElement
+        existing[index] = undefined
+        lastIndex = index
+      } else {
+        child.e = document.createTextNode('')
+      }
+      child.pP = child.props
       continue
     }
     const index = existing.findIndex((dom) => dom && isSameDomNode(dom, child))
@@ -881,6 +968,7 @@ const hydrateChildren = (node: NodeObject, container: Container): void => {
     }
     const dom = existing[index] as SupportedElement | Text
     existing[index] = undefined
+    lastIndex = index
     child.e = dom
     if (isNodeString(child)) {
       // The server merges adjacent text into a single text node
@@ -903,7 +991,12 @@ export const renderNode = (node: NodeObject, container: Container, hydrate?: boo
   const context: Context = []
   ;(context as Context)[5] = [] // error handler stack
   ;(context as Context)[4] = true // start top level render
-  build(context, node, undefined)
+  isHydrating = !!hydrate
+  try {
+    build(context, node, undefined)
+  } finally {
+    isHydrating = false
+  }
   ;(context as Context)[4] = false // finish top level render
 
   if (hydrate) {

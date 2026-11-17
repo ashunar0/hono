@@ -1,7 +1,8 @@
 /** @jsxImportSource ../ */
 import { JSDOM } from 'jsdom'
-import { useEffect, useState } from '.'
+import { Suspense, use, useEffect, useState } from '.'
 import DefaultExport, { createRoot, hydrateRoot } from './client'
+import { clearCache } from './intrinsic-element/components'
 
 describe('createRoot', () => {
   beforeAll(() => {
@@ -149,7 +150,7 @@ describe('hydrateRoot with server-rendered DOM', () => {
     const App = () => (
       <div>
         <h1>Hello</h1>
-        <input name="title" />
+        <input name='title' />
       </div>
     )
     serverRender(<App />)
@@ -166,7 +167,7 @@ describe('hydrateRoot with server-rendered DOM', () => {
   })
 
   it('should keep the value and focus of an input the user typed into', () => {
-    const App = () => <input name="title" value="First" />
+    const App = () => <input name='title' value='First' />
     serverRender(<App />)
     const input = rootElement.querySelector('input') as HTMLInputElement
     input.focus()
@@ -220,9 +221,9 @@ describe('hydrateRoot with server-rendered DOM', () => {
 
   it('should keep the selected option of a select', () => {
     const App = () => (
-      <select value="a">
-        <option value="a">A</option>
-        <option value="b">B</option>
+      <select value='a'>
+        <option value='a'>A</option>
+        <option value='b'>B</option>
       </select>
     )
     serverRender(<App />)
@@ -236,7 +237,7 @@ describe('hydrateRoot with server-rendered DOM', () => {
   })
 
   it('should keep the value of a textarea', () => {
-    const App = () => <textarea value="server" />
+    const App = () => <textarea value='server' />
     rootElement.innerHTML = '<textarea>server</textarea>'
     const textarea = rootElement.querySelector('textarea') as HTMLTextAreaElement
     textarea.value = 'typed'
@@ -279,10 +280,10 @@ describe('hydrateRoot with server-rendered DOM', () => {
     const App = () => (
       <ul>
         <>
-          <Item name="a" />
-          <Item name="b" />
+          <Item name='a' />
+          <Item name='b' />
         </>
-        <Item name="c" />
+        <Item name='c' />
       </ul>
     )
     serverRender(<App />)
@@ -307,5 +308,136 @@ describe('hydrateRoot with server-rendered DOM', () => {
 
     expect(rootElement.querySelector('div')).toBe(div)
     expect(rootElement.innerHTML).toBe('<div><p>client</p></div>')
+  })
+})
+
+describe('hydrateRoot with server-rendered head and Suspense', () => {
+  beforeAll(() => {
+    global.requestAnimationFrame = (cb) => setTimeout(cb)
+  })
+
+  let dom: JSDOM
+  let rootElement: HTMLElement
+  const setup = (head: string, root: string) => {
+    clearCache()
+    dom = new JSDOM(`<html><head>${head}</head><body><div id="root">${root}</div></body></html>`, {
+      runScripts: 'dangerously',
+    })
+    global.document = dom.window.document
+    global.HTMLElement = dom.window.HTMLElement
+    global.SVGElement = dom.window.SVGElement
+    global.Text = dom.window.Text
+    rootElement = document.getElementById('root') as HTMLElement
+  }
+
+  it('should reuse the title the server put in the head', async () => {
+    setup('<title>Hello</title>', '<h1>Hello</h1>')
+    const title = document.head.querySelector('title')
+    const h1 = rootElement.querySelector('h1')
+
+    hydrateRoot(
+      rootElement,
+      <>
+        <title>Hello</title>
+        <h1>Hello</h1>
+      </>
+    )
+    await new Promise((resolve) => setTimeout(resolve))
+
+    expect(document.head.querySelectorAll('title').length).toBe(1)
+    expect(document.head.querySelector('title')).toBe(title)
+    expect(document.head.innerHTML).toBe('<title>Hello</title>')
+    expect(rootElement.querySelector('h1')).toBe(h1)
+    expect(rootElement.innerHTML).toBe('<h1>Hello</h1>')
+  })
+
+  it('should keep the content the server resolved until the client resolves it', async () => {
+    // the server streamed the content, and its script removed the markers
+    setup('', '<div><p>content</p></div>')
+    const p = rootElement.querySelector('p')
+    let resolve: (value: string) => void = () => {}
+    const promise = new Promise<string>((r) => (resolve = r))
+    const onClick = vi.fn()
+    const Content = () => <p onClick={onClick}>{use(promise)}</p>
+
+    hydrateRoot(
+      rootElement,
+      <div>
+        <Suspense fallback={<span>loading</span>}>
+          <Content />
+        </Suspense>
+      </div>
+    )
+    await new Promise((r) => setTimeout(r))
+
+    expect(rootElement.querySelector('p')).toBe(p)
+    expect(rootElement.innerHTML).toBe('<div><p>content</p></div>')
+
+    resolve('content')
+    await new Promise((r) => setTimeout(r))
+    await new Promise((r) => setTimeout(r))
+    expect(rootElement.querySelector('p')).toBe(p)
+    expect(rootElement.innerHTML).toBe('<div><p>content</p></div>')
+    p?.click()
+    expect(onClick).toHaveBeenCalledTimes(1)
+  })
+
+  it('should reuse the fallback the server sent before the content', async () => {
+    setup('', '<div><template id="H:0"></template><span>loading</span><!--/$--></div>')
+    const span = rootElement.querySelector('span')
+    const promise = new Promise<string>(() => {})
+    const Content = () => <p>{use(promise)}</p>
+
+    hydrateRoot(
+      rootElement,
+      <div>
+        <Suspense fallback={<span>loading</span>}>
+          <Content />
+        </Suspense>
+      </div>
+    )
+    await new Promise((r) => setTimeout(r))
+
+    expect(rootElement.querySelector('span')).toBe(span)
+    // The markers are removed, so the server's script does nothing when the content arrives
+    expect(rootElement.innerHTML).toBe('<div><span>loading</span></div>')
+  })
+
+  it('should not break the DOM when the server content arrives after hydration', async () => {
+    setup('', '<div><template id="H:0"></template><span>loading</span><!--/$--></div>')
+    let resolve: (value: string) => void = () => {}
+    const promise = new Promise<string>((r) => (resolve = r))
+    const Content = () => <p>{use(promise)}</p>
+
+    hydrateRoot(
+      rootElement,
+      <div>
+        <Suspense fallback={<span>loading</span>}>
+          <Content />
+        </Suspense>
+      </div>
+    )
+    await new Promise((r) => setTimeout(r))
+
+    // the same chunk that streaming.ts sends when the content is ready
+    const chunk = document.createElement('div')
+    chunk.innerHTML = '<template data-hono-target="H:0"><p>content</p></template>'
+    const script = document.createElement('script')
+    script.textContent = `((d,c,n) => {
+c=d.currentScript.previousSibling
+d=d.getElementById('H:0')
+if(!d)return
+do{n=d.nextSibling;n.remove()}while(n.nodeType!=8||n.nodeValue!='/$')
+d.replaceWith(c.content)
+})(document)`
+    document.body.appendChild(chunk.firstChild as Node)
+    document.body.appendChild(script)
+
+    resolve('content')
+    await new Promise((r) => setTimeout(r))
+    await new Promise((r) => setTimeout(r))
+
+    expect(rootElement.innerHTML).toBe('<div><p>content</p></div>')
+    expect(rootElement.querySelectorAll('p').length).toBe(1)
   })
 })

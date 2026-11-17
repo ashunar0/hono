@@ -12,7 +12,7 @@ import type { IntrinsicElements } from '../../intrinsic-elements'
 import type { FC, JSXNode, PropsWithChildren, RefObject } from '../../types'
 import { FormContext, registerAction } from '../hooks'
 import type { PreserveNodeType } from '../render'
-import { createPortal, getNameSpaceContext } from '../render'
+import { createPortal, getIsHydrating, getNameSpaceContext } from '../render'
 
 // this function is a testing utility and should not be exported to the user
 export const clearCache = () => {
@@ -117,6 +117,10 @@ const documentMetadataTag = (
     }
   } else {
     existingElements = head.querySelectorAll<HTMLElement>(tag)
+    if (tag === 'title' && getIsHydrating()) {
+      // Reuse the title the server rendered, as React does
+      element = existingElements[0] || null
+    }
   }
 
   precedence = supportSort ? (precedence ?? '') : undefined
